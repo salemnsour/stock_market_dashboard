@@ -1,0 +1,391 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+
+library(shiny)
+
+library(quantmod)
+library(plotly)
+library(lubridate)
+library(dplyr)
+library(tidyr)  # For pivot_wider
+library(zoo)    # For rolling averages
+
+# Sample market cap data (in billions USD)
+market_caps <- data.frame(
+  Stock = c("TSLA", "NVDA", "AAPL", "GOOGL", "AMZN", "META", "NFLX", "IBM", "ORCL", "AMD"),
+  MarketCap = c(870, 1130, 2680, 1450, 1800, 760, 210, 120, 280, 150)  # Example data
+)
+
+ui <- fluidPage(
+  # Add custom CSS styles
+  tags$style(HTML("
+  body {
+    background-color:#3c3c3c ; /* Black background */
+    color: #a8f1a0; /* Light green text globally */
+  }
+  /* Sidebar panel background */
+  .well {
+    background-color: #808080; /* Medium gray for the sidebar */
+    color: #a8f1a0; /* Light green for text */
+    border: none; /* Remove default border */
+  }
+
+  /* Sidebar text color */
+  .control-label, .shiny-input-container label {
+    color: #a8f1a0; /* Light green for labels */
+  }
+
+  /* Input text and dropdown color */
+  .form-control {
+    background-color: #4a4a4a; /* Darker gray for input boxes */
+    color: #a8f1a0; /* Light green for input text */
+    border: 1px solid #555; /* Border styling for inputs */
+  }
+
+  /* Placeholder text in inputs */
+  .form-control::placeholder {
+    color: #b6d9b6; /* Slightly lighter green */
+  }
+
+  /* Dropdown menu styling */
+  .selectize-dropdown-content {
+    background-color: #4a4a4a; /* Match input box background */
+    color: #a8f1a0; /* Match input text color */
+  }
+
+  /* Hover effects for dropdown options */
+  .selectize-dropdown-content .option:hover {
+    background-color: #5a5a5a;
+    color: #c7ffc7;
+  }
+
+  /* Main panel styling (if necessary) */
+  .main-panel {
+    background-color: #ffffff; /* Keep it white or customize */
+    color: #3c3c3c; /* Dark gray text */
+  }
+")),
+
+  
+  titlePanel("Stock Market Dashboard"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("stocks", "Select Stocks",
+                  choices = market_caps$Stock, 
+                  selected = c("TSLA", "NVDA"), 
+                  multiple = TRUE),  # Allow multiple selections
+      dateRangeInput("date_range", "Select Date Range",
+                     start = Sys.Date() - 365, 
+                     end = Sys.Date()),
+      selectInput("plot_type", "Select Plot Type",  # Dropdown for plot types
+                  choices = c("Line Chart", "Candlestick Chart", "Key Metrics", 
+                              "Market Share (Pie Chart)", "Correlation Heatmap", 
+                              "Bollinger Bands", "Volume Analysis", 
+                               "Graded Error Bar"),
+                  selected = "Line Chart"),
+      width = 3
+    ),
+    mainPanel(
+      plotlyOutput("main_plot", height = "600px"),  # Main plot area
+      verbatimTextOutput("metrics")  # Metrics output
+    )
+  )
+)
+
+
+
+
+server <- function(input, output) {
+  stock_data <- reactive({
+    stocks <- input$stocks
+    date_range <- input$date_range
+
+    # Validate stocks selection
+    if (is.null(stocks) || length(stocks) == 0) {
+      return(NULL)  # Return NULL if no stocks are selected
+    }
+
+    # Fetch data for selected stocks
+    data_list <- lapply(stocks, function(stock) {
+      stock_data <- tryCatch(
+        getSymbols(stock, src = "yahoo", auto.assign = FALSE, 
+                   from = date_range[1], 
+                   to = date_range[2], warnings = FALSE),
+        error = function(e) NULL
+      )
+      if (is.null(stock_data)) {
+        return(NULL)  # Handle cases where data is not returned
+      }
+      df <- data.frame(Date = index(stock_data), coredata(stock_data))
+      colnames(df) <- c("Date", "Open", "High", "Low", "Close", "Volume", "Adjusted")
+      df$Stock <- stock
+      return(df)
+    })
+
+    # Remove NULL or invalid data frames
+    data_list <- Filter(Negate(is.null), data_list)
+
+    if (length(data_list) == 0) {
+      return(NULL)  # No valid data
+    }
+
+    do.call(rbind, data_list)
+  })
+
+  output$main_plot <- renderPlotly({
+    data <- stock_data()
+
+    if (is.null(data)) {
+      return(NULL)  # No data to plot
+    }
+ 
+
+    if (input$plot_type == "Line Chart") {
+      # Line Chart
+      plot_ly(data, x = ~Date, y = ~Close, color = ~Stock, type = 'scatter', mode = 'lines') %>%
+        layout(
+                title = list(text = "Stock Closing Prices", font = list(color = "#a8f1a0")),  # Light green title
+                xaxis = list(
+                    title = "Date", 
+                    titlefont = list(color = "#a8f1a0"),  # Light green title for x-axis
+                    tickfont = list(color = "#a8f1a0")  # Light green color for x-axis 
+                ),
+                yaxis = list(
+                    title = "Closing Price", 
+                    titlefont = list(color = "#a8f1a0"),  # Light green title for y-axis
+                    tickfont = list(color = "#a8f1a0")  # Light green color for y-axis
+                ),
+                
+                 legend = list(
+                    font = list(color = "#a8f1a0")  # Light green color for legend text
+                ),
+                plot_bgcolor = 'rgba(0,0,0,0)',  # Transparent background for plot area
+                paper_bgcolor = 'rgba(0,0,0,0)'  # Transparent background for paper
+            )
+
+      
+    } else if (input$plot_type == "Candlestick Chart") {
+  # Candlestick Chart with Moving Averages
+  fig_list <- list()
+
+  for (stock_name in input$stocks) {
+    stock_data <- data[data$Stock == stock_name, ]
+    if (nrow(stock_data) == 0) next
+
+    # Calculate Moving Averages
+    stock_data$SMA20 <- rollmean(stock_data$Close, k = 30, fill = NA, align = "center")
+    stock_data$SMA50 <- rollmean(stock_data$Close, k = 180, fill = NA, align = "center")
+
+    # Create Candlestick Chart
+    candlestick <- plot_ly(data = stock_data,
+                           x = ~Date, type = "candlestick",
+                           open = ~Open, high = ~High, low = ~Low, close = ~Close,
+                           name = stock_name) %>%
+      add_lines(x = ~Date, y = ~SMA20, line = list(color = "blue", width = 1.5), 
+                name = "30-Day SMA") %>%
+      add_lines(x = ~Date, y = ~SMA50, line = list(color = "red", width = 1.5), 
+                name = "180-Day SMA") %>%
+      
+      
+      layout(title =list(text = "CandleStick plot" , font = list(color = "#a8f1a0")) ,
+             xaxis = list(
+                    title = "Date", 
+                    titlefont = list(color = "#a8f1a0"),  # Light green title for x-axis
+                    tickfont = list(color = "#a8f1a0")  # Light green color for x-axis 
+                ),
+                yaxis = list(
+                    title = "Closing Price", 
+                    titlefont = list(color = "#a8f1a0"),  # Light green title for y-axis
+                    tickfont = list(color = "#a8f1a0")  # Light green color for y-axis
+                ),
+                
+                 legend = list(
+                    font = list(color = "#a8f1a0")  # Light green color for legend text
+                ),
+                plot_bgcolor = 'rgba(0,0,0,0)',  # Transparent background for plot area
+                paper_bgcolor = 'rgba(0,0,0,0)'  # Transparent background for paper
+            )
+    
+    fig_list <- append(fig_list, list(candlestick))
+  }
+
+  subplot(fig_list, nrows = length(fig_list), shareX = TRUE)
+
+    } else if (input$plot_type == "Market Share (Pie Chart)") {
+      # Market Share Pie Chart
+      selected_market_caps <- market_caps %>% filter(Stock %in% input$stocks)
+      if (nrow(selected_market_caps) == 0) return(NULL)
+      plot_ly(data = selected_market_caps,
+              labels = ~Stock, values = ~MarketCap, type = "pie", textinfo = "label+percent") %>%
+        layout(title = list(text = "Market Share of Selected Companies" ,         
+                            font=list(color = "#a8f1a0")
+                            ),
+                 legend = list(
+                    font = list(color = "#a8f1a0")  # Light green color for legend text
+                ),
+                plot_bgcolor = 'rgba(0,0,0,0)',  # Transparent background for plot area
+                paper_bgcolor = 'rgba(0,0,0,0)' 
+               )
+
+    } else if (input$plot_type == "Correlation Heatmap") {
+      # Correlation Heatmap
+      correlation_data <- data %>%
+        select(Date, Stock, Close) %>%
+        pivot_wider(names_from = Stock, values_from = Close) %>%
+        select(-Date)
+      correlation_matrix <- cor(correlation_data, use = "pairwise.complete.obs")
+      plot_ly(z = correlation_matrix, x = colnames(correlation_matrix), 
+              y = rownames(correlation_matrix), type = "heatmap") %>%
+        layout(title =list(text = "Correlation between Stocks", font = list(color = "#a8f1a0")),
+               xaxis = list(
+                    title = "Date", 
+                    titlefont = list(color = "#a8f1a0"),  # Light green title for x-axis
+                    tickfont = list(color = "#a8f1a0")  # Light green color for x-axis 
+                ),
+                yaxis = list(
+                    title = "Closing Price", 
+                    titlefont = list(color = "#a8f1a0"),  # Light green title for y-axis
+                    tickfont = list(color = "#a8f1a0")  # Light green color for y-axis
+                ),
+                    coloraxis = list(
+                    colorbar = list(
+                        title = "Correlation", 
+                        titlefont = list(color = "#a8f1a0"),  # Light green title for color bar
+                        tickfont = list(color = "#a8f1a0")  # Light green color for numbers on color bar
+                    )
+                ),
+                legend = list(
+                    font = list(color = "#a8f1a0")  # Light green color for legend text
+                ),
+                plot_bgcolor = 'rgba(0,0,0,0)',  # Transparent background for plot area
+                paper_bgcolor = 'rgba(0,0,0,0)' 
+               )
+
+    } else if (input$plot_type == "Bollinger Bands") {
+      # Bollinger Bands
+      fig <- NULL
+      for (stock_name in input$stocks) {
+        stock_data <- data[data$Stock == stock_name, ]
+        if (nrow(stock_data) == 0) next
+        stock_data$MA20 <- rollmean(stock_data$Close, k = 20, fill = NA, align = "right")
+        stock_data$BB_Upper <- stock_data$MA20 + 2 * rollapply(stock_data$Close, width = 20, sd, fill = NA)
+        stock_data$BB_Lower <- stock_data$MA20 - 2 * rollapply(stock_data$Close, width = 20, sd, fill = NA)
+
+        fig <- plot_ly(data = stock_data, x = ~Date, y = ~Close, type = 'scatter', mode = 'lines',
+                       name = paste(stock_name, "Closing Price")) %>%
+          add_lines(x = ~Date, y = ~BB_Upper, line = list(color = "red"), name = "Upper Band") %>%
+          add_lines(x = ~Date, y = ~BB_Lower, line = list(color = "blue"), name = "Lower Band")
+      }
+       fig <- fig %>%
+      layout(
+        title = list(text = "Bollinger Bands", font = list(color = "#a8f1a0")),  # Light green title
+        xaxis = list(
+          title = "Date", 
+          titlefont = list(color = "#a8f1a0"),  # Light green title for x-axis
+          tickfont = list(color = "#a8f1a0")  # Light green tick labels for x-axis
+        ),
+        yaxis = list(
+          title = "Price", 
+          titlefont = list(color = "#a8f1a0"),  # Light green title for y-axis
+          tickfont = list(color = "#a8f1a0")  # Light green tick labels for y-axis
+        ),
+        plot_bgcolor = 'rgba(0,0,0,0)',  # Transparent background for plot area
+        paper_bgcolor = 'rgba(0,0,0,0)',  # Transparent background for paper
+        showlegend = TRUE,
+        legend = list(
+          font = list(color = "#a8f1a0"),  # Light green legend font
+          bgcolor = "rgba(0,0,0,0)"  # Transparent legend background
+        )
+      )
+    
+      
+      fig
+
+    } else if (input$plot_type == "Volume Analysis") {
+      # Volume Analysis
+      plot_ly(data, x = ~Date, y = ~Volume, color = ~Stock, type = "bar") %>%
+        layout(
+            title = list(text = "Volume Analysis", font = list(color = "#a8f1a0")),  # Light green title
+            xaxis = list(
+                title = "Date", 
+                titlefont = list(color = "#a8f1a0"),  # Light green title for x-axis
+                tickfont = list(color = "#a8f1a0")  # Light green tick labels for x-axis
+            ),
+            yaxis = list(
+                title = "Volume", 
+                titlefont = list(color = "#a8f1a0"),  # Light green title for y-axis
+                tickfont = list(color = "#a8f1a0")  # Light green tick labels for y-axis
+            ),
+            plot_bgcolor = 'rgba(0,0,0,0)',  # Transparent background for plot area
+            paper_bgcolor = 'rgba(0,0,0,0)',  # Transparent background for paper
+            showlegend = TRUE,
+            legend = list(
+                font = list(color = "#a8f1a0"),  # Light green legend font
+                bgcolor = "rgba(0,0,0,0)"  # Transparent legend background
+            )
+        )
+
+    } else if (input$plot_type == "Graded Error Bar") { # Only render if selected
+    confidence_levels <- c(0.80, 0.95, 0.99)
+
+grouped_data <- data %>%
+  group_by(Stock) %>%
+  summarise(
+    MeanClose = mean(Close),        # Single mean per stock
+    StdDev = sd(Close),             # Standard deviation
+    n = n(),                        # Count observations per stock
+    .groups = "drop"
+  ) %>%
+  crossing(ConfidenceLevel = confidence_levels) %>%
+  mutate(
+    StdError = StdDev / sqrt(n),    # Standard error calculation
+    Z = qnorm((1 + ConfidenceLevel) / 2),  # Z-value for each confidence level
+    CI_Lower = MeanClose - Z * StdError,   # Confidence interval lower bound
+    CI_Upper = MeanClose + Z * StdError    # Confidence interval upper bound
+  )
+
+# Get the range of MeanClose for x-axis limits
+x_range <- range(grouped_data$CI_Lower, grouped_data$CI_Upper)
+
+ggplot(grouped_data, aes(y = Stock, x = MeanClose)) +
+  geom_errorbarh(aes(xmin = CI_Lower, xmax = CI_Upper, color = factor(ConfidenceLevel), y = Stock),
+                 height = 0.2, position = position_dodge(width = 0.5)) +
+  scale_color_manual(
+    name = "Confidence Level",
+    values = c("0.8" = "#9ecae1", "0.95" = "#3182bd", "0.99" = "#08519c"),
+    labels = c("80%", "95%", "99%")
+  ) +
+  geom_point(aes(y = Stock), size = 3, color = "#d95f0e", position = position_dodge(width = 0.5)) +
+  labs(x = "Mean Close Price", y = "", title = "") +
+  scale_y_discrete(labels = unique(data$Stock)) +  # Labels for stock names
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 12, color = "#a8f1a0"),
+    axis.title.x = element_text(size = 12, color = "#a8f1a0"),
+    axis.text.x = element_text(color = "#a8f1a0"),
+    legend.position = "bottom",
+    panel.grid.major.y = element_line(color = "lightgray", linewidth = 0.3),
+    panel.grid.minor.y = element_blank(),
+    panel.background = element_rect(fill = "#3c3c3c"),
+    plot.background = element_rect(fill = "#3c3c3c"),
+    legend.text = element_text(color = "#a8f1a0"),
+    legend.background = element_rect(fill = "#3c3c3c")
+  ) + coord_cartesian(xlim = x_range) # Set fixed x-axis limits for horizontal bars
+
+
+    } else {
+      return(NULL)
+    }
+  })
+}
+
+shinyApp(ui = ui, server = server)
+
+
+```
+
